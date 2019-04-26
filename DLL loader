@@ -1,0 +1,34 @@
+#include <windows.h>
+#include <cstdio>
+#include <cstdlib>
+#include <iostream>
+
+using namespace std;
+
+typedef BOOL(*StartHook)();
+
+int APIENTRY WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance, _In_ LPSTR lpCmdLine, _In_ int nShowCmd)
+{
+	HMODULE hModule = LoadLibrary("KbHook.dll");
+	if (hModule == NULL)
+	{
+		return 0;
+	}
+	StartHook STHK = (StartHook)GetProcAddress(hModule, "StartHook");
+	if (STHK == NULL)
+	{
+		return 0;
+	}
+	BOOL bRet = STHK();
+	if (bRet)
+	{
+		MessageBox(NULL, "Hook Success", "SetHook", 0);
+	}
+	else
+	{
+		MessageBox(NULL, "Hook Error", "SetHook", 0);
+		return 0;
+	}
+	Sleep(100000);
+	return 0;
+}
